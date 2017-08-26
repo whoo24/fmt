@@ -1265,12 +1265,30 @@ inline fmt::StringRef thousands_sep(...) { return ""; }
 #endif
 
 template <typename Formatter>
-void format_arg(Formatter&, ...) {
+Null<> format_arg(Formatter&, ...) {
   FMT_STATIC_ASSERT(FalseType<Formatter>::value,
                     "Cannot format argument. To enable the use of ostream "
                     "operator<< include fmt/ostream.h. Otherwise provide "
                     "an overload of format_arg.");
 }
+
+template <typename T, typename U>
+struct IsSame {
+  enum {value = 0};
+};
+
+template <typename T>
+struct IsSame<T, T> {
+  enum {value = 1};
+};
+
+template <typename Formatter, typename T>
+struct HasFormatArg {
+  enum {
+    value = IsSame<Null<>, decltype(format_arg(
+        get<Formatter>(), get<typename Formatter::Char>(), get<T>()))>::value
+  };
+};
 
 // Makes an Arg object from any type.
 template <typename Formatter>
@@ -1285,9 +1303,13 @@ class MakeValue : public Arg {
   // of "[const] volatile char *" which is printed as bool by iostreams.
   // Do not implement!
   template <typename T>
-  MakeValue(const T *value);
+  MakeValue(const T *value,
+            typename EnableIf<
+              !HasFormatArg<Formatter, const T*>::value, int>::type = 0);
   template <typename T>
-  MakeValue(T *value);
+  MakeValue(T *value,
+            typename EnableIf<
+              !HasFormatArg<Formatter, T*>::value, int>::type = 0);
 
   // The following methods are private to disallow formatting of wide
   // characters and strings into narrow strings as in
