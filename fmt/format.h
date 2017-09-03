@@ -1796,7 +1796,7 @@ class basic_format_specs : public align_spec {
  public:
   unsigned flags_;
   int precision_;
-  char type_;
+  Char type_;
 
   basic_format_specs(unsigned width = 0, char type = 0, wchar_t fill = ' ')
   : align_spec(width, fill), flags_(0), precision_(-1), type_(type) {}
@@ -1809,7 +1809,7 @@ class basic_format_specs : public align_spec {
 
   bool flag(unsigned f) const { return (flags_ & f) != 0; }
   int precision() const { return precision_; }
-  char type() const { return type_; }
+  Char type() const { return type_; }
 };
 
 typedef basic_format_specs<char> format_specs;
@@ -3135,24 +3135,6 @@ unsigned parse_nonnegative_int(Iterator &it) {
   return value;
 }
 
-inline void require_numeric_argument(Type type, char spec) {
-  if (!is_numeric(type)) {
-    FMT_THROW(fmt::format_error(
-        fmt::format("format specifier '{}' requires numeric argument", spec)));
-  }
-}
-
-template <typename Iterator>
-void check_sign(Iterator &it, Type type) {
-  char sign = static_cast<char>(*it);
-  require_numeric_argument(type, sign);
-  if (is_integral(type) && type != INT && type != LONG_LONG && type != CHAR) {
-    FMT_THROW(format_error(fmt::format(
-      "format specifier '{}' requires signed argument", sign)));
-  }
-  ++it;
-}
-
 template <typename Char, typename Context>
 class custom_formatter {
  private:
@@ -3219,29 +3201,77 @@ struct precision_handler {
 template <typename Char>
 class specs_handler_base {
  public:
-  explicit specs_handler_base(basic_format_specs<Char> &specs)
-    : specs_(specs) {}
+  specs_handler_base(basic_format_specs<Char> &specs, Type arg_type)
+    : specs_(specs), arg_type_(arg_type) {}
 
-  void on_align(alignment align) { specs_.align_ = align; }
+  void on_align(alignment align) {
+    specs_.align_ = align;
+    if (align == ALIGN_NUMERIC)
+      require_numeric_argument('=');
+  }
+
   void on_fill(Char fill) { specs_.fill_ = fill; }
-  void on_plus() { specs_.flags_ |= SIGN_FLAG | PLUS_FLAG; }
-  void on_minus() { specs_.flags_ |= MINUS_FLAG; }
-  void on_space() { specs_.flags_ |= SIGN_FLAG; }
-  void on_hash() { specs_.flags_ |= HASH_FLAG; }
+
+  void on_plus() {
+    check_sign('+');
+    specs_.flags_ |= SIGN_FLAG | PLUS_FLAG;
+  }
+
+  void on_minus() {
+    check_sign('-');
+    specs_.flags_ |= MINUS_FLAG;
+  }
+
+  void on_space() {
+    check_sign(' ');
+    specs_.flags_ |= SIGN_FLAG;
+  }
+
+  void on_hash() {
+    require_numeric_argument('#');
+    specs_.flags_ |= HASH_FLAG;
+  }
 
   void on_zero() {
+    require_numeric_argument('0');
     specs_.align_ = ALIGN_NUMERIC;
     specs_.fill_ = '0';
   }
 
   void on_width(unsigned width) { specs_.width_ = width; }
   void on_precision(unsigned precision) { specs_.precision_ = precision; }
-  void on_type(char type) { specs_.type_ = type; }
+
+  void on_precision_end() {
+    if (is_integral(arg_type_) || arg_type_ == POINTER) {
+      FMT_THROW(format_error(
+          fmt::format("precision not allowed in {} format specifier",
+          arg_type_ == POINTER ? "pointer" : "integer")));
+    }
+  }
+
+  void on_type(Char type) { specs_.type_ = type; }
 
  protected:
   ~specs_handler_base() {}
 
+  void require_numeric_argument(char spec) const {
+    if (!is_numeric(arg_type_)) {
+      FMT_THROW(format_error(
+          format("format specifier '{}' requires numeric argument", spec)));
+    }
+  }
+
+  void check_sign(char sign) const {
+    require_numeric_argument(sign);
+    if (is_integral(arg_type_) && arg_type_ != INT && arg_type_ != LONG_LONG &&
+        arg_type_ != CHAR) {
+      FMT_THROW(format_error(fmt::format(
+        "format specifier '{}' requires signed argument", sign)));
+    }
+  }
+
   basic_format_specs<Char> &specs_;
+  Type arg_type_;
 };
 
 template <typename Handler, typename T, typename Context>
@@ -3252,13 +3282,16 @@ inline void set_dynamic_spec(T &value, basic_arg<Context> arg) {
   value = static_cast<int>(big_value);
 }
 
+struct auto_id {};
+
 template <typename Context>
 class specs_handler : public specs_handler_base<typename Context::char_type> {
  public:
   typedef typename Context::char_type char_type;
 
-  specs_handler(basic_format_specs<char_type> &specs, Context &ctx)
-    : specs_handler_base<char_type>(specs), context_(ctx) {}
+  specs_handler(
+      basic_format_specs<char_type> &specs, Type arg_type, Context &ctx)
+    : specs_handler_base<char_type>(specs, arg_type), context_(ctx) {}
 
   template <typename Id>
   void on_dynamic_width(Id arg_id) {
@@ -3273,7 +3306,7 @@ class specs_handler : public specs_handler_base<typename Context::char_type> {
   }
 
  private:
-  basic_arg<Context> get_arg(monostate) {
+  basic_arg<Context> get_arg(auto_id) {
     return context_.next_arg();
   }
 
@@ -3310,8 +3343,8 @@ struct dynamic_format_specs : basic_format_specs<Char> {
 template <typename Char>
 class dynamic_specs_handler : public specs_handler_base<Char> {
  public:
-  explicit dynamic_specs_handler(dynamic_format_specs<Char> &specs)
-    : specs_handler_base<Char>(specs), specs_(specs) {}
+  dynamic_specs_handler(dynamic_format_specs<Char> &specs, Type arg_type)
+    : specs_handler_base<Char>(specs, arg_type), specs_(specs) {}
 
   template <typename Id>
   void on_dynamic_width(Id arg_id) {
@@ -3329,7 +3362,7 @@ class dynamic_specs_handler : public specs_handler_base<Char> {
     ref = arg_ref<Char>(arg_id);
   }
 
-  void set(arg_ref<Char> &ref, monostate) {
+  void set(arg_ref<Char> &ref, auto_id) {
     ref.kind = arg_ref<Char>::NONE;
   }
 
@@ -3367,7 +3400,7 @@ Iterator parse_arg_id(Iterator it, Handler handler) {
 //     characters, possibly emulated via null_terminating_iterator, representing
 //     format specifiers.
 template <typename Iterator, typename Handler>
-Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
+Iterator parse_format_specs(Iterator it, Handler &handler) {
   typedef typename Iterator::value_type char_type;
   // Parse fill and alignment.
   if (char_type c = *it) {
@@ -3397,8 +3430,6 @@ Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
           it += 2;
           handler.on_fill(c);
         } else ++it;
-        if (align == ALIGN_NUMERIC)
-          require_numeric_argument(arg_type, '=');
         break;
       }
     } while (--p >= it);
@@ -3407,28 +3438,26 @@ Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
   // Parse sign.
   switch (*it) {
     case '+':
-      check_sign(it, arg_type);
       handler.on_plus();
+      ++it;
       break;
     case '-':
-      check_sign(it, arg_type);
       handler.on_minus();
+      ++it;
       break;
     case ' ':
-      check_sign(it, arg_type);
       handler.on_space();
+      ++it;
       break;
   }
 
   if (*it == '#') {
-    require_numeric_argument(arg_type, '#');
     handler.on_hash();
     ++it;
   }
 
   // Parse zero flag.
   if (*it == '0') {
-    require_numeric_argument(arg_type, '0');
     handler.on_zero();
     ++it;
   }
@@ -3440,7 +3469,7 @@ Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
     struct width_handler {
       explicit width_handler(Handler &h) : handler(h) {}
 
-      void operator()() { handler.on_dynamic_width(monostate()); }
+      void operator()() { handler.on_dynamic_width(auto_id()); }
       void operator()(unsigned id) { handler.on_dynamic_width(id); }
       void operator()(basic_string_view<char_type> id) {
         handler.on_dynamic_width(id);
@@ -3462,7 +3491,7 @@ Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
       struct precision_handler {
         explicit precision_handler(Handler &h) : handler(h) {}
 
-        void operator()() { handler.on_dynamic_precision(monostate()); }
+        void operator()() { handler.on_dynamic_precision(auto_id()); }
         void operator()(unsigned id) { handler.on_dynamic_precision(id); }
         void operator()(basic_string_view<char_type> id) {
           handler.on_dynamic_precision(id);
@@ -3476,16 +3505,12 @@ Iterator parse_format_specs(Iterator it, Type arg_type, Handler &handler) {
     } else {
       FMT_THROW(format_error("missing precision specifier"));
     }
-    if (is_integral(arg_type) || arg_type == POINTER) {
-      FMT_THROW(format_error(
-          fmt::format("precision not allowed in {} format specifier",
-          arg_type == POINTER ? "pointer" : "integer")));
-    }
+    handler.on_precision_end();
   }
 
   // Parse type.
   if (*it != '}' && *it)
-    handler.on_type(static_cast<char>(*it++));
+    handler.on_type(*it++);
   return it;
 }
 
@@ -3501,8 +3526,8 @@ const Char *do_format_arg(basic_buffer<Char> &buffer,
     format.remove_prefix(1);
     if (visit(custom_formatter<Char, Context>(buffer, format, ctx), arg))
       return begin(format);
-    specs_handler<Context> handler(specs, ctx);
-    it = parse_format_specs(it + 1, arg.type(), handler);
+    specs_handler<Context> handler(specs, arg.type(), ctx);
+    it = parse_format_specs(it + 1, handler);
   }
 
   if (*it != '}')
@@ -3534,8 +3559,9 @@ struct formatter<
   template <typename Range>
   auto parse(Range format) -> decltype(begin(format)) {
     auto it = internal::null_terminating_iterator<Char>(format);
-    internal::dynamic_specs_handler<Char> handler(specs_);
-    it = parse_format_specs(it, internal::gettype<T>(), handler);
+    internal::dynamic_specs_handler<Char>
+        handler(specs_, internal::gettype<T>());
+    it = parse_format_specs(it, handler);
     return pointer_from(it);
   }
 
